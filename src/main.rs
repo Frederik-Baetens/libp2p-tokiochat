@@ -64,18 +64,11 @@ use tokio::io::{self, AsyncBufReadExt};
 #[derive(Debug)]
 pub enum OutEvent {
     GossipsubEvent(GossipsubEvent),
-    MdnsEvent(MdnsEvent),
 }
 
 impl From<GossipsubEvent> for OutEvent {
     fn from(gossipsubevent: GossipsubEvent) -> Self {
         OutEvent::GossipsubEvent(gossipsubevent)
-    }
-}
-
-impl From<MdnsEvent> for OutEvent {
-    fn from(mdnsevent: MdnsEvent) -> Self {
-        OutEvent::MdnsEvent(mdnsevent)
     }
 }
 
@@ -87,7 +80,6 @@ impl From<MdnsEvent> for OutEvent {
 #[derive(NetworkBehaviour)]
 struct MyBehaviour {
     gossipsub: Gossipsub,
-    mdns: Mdns,
 }
 
 /// The `tokio::main` attribute sets up a tokio runtime.
@@ -119,8 +111,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Create a Swarm to manage peers and events.
     let mut swarm: Swarm<MyBehaviour> = {
-        let mdns = Mdns::new(Default::default()).await?;
-
         // To content-address message, we can take the hash of message and use it as an ID.
         let message_id_fn = |message: &GossipsubMessage| {
             let mut s = DefaultHasher::new();
@@ -140,7 +130,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut behaviour = MyBehaviour {
             gossipsub: Gossipsub::new(MessageAuthenticity::Signed(id_keys), gossipsub_config)
                 .unwrap(),
-            mdns,
         };
 
         behaviour.gossipsub.subscribe(&gossipsub_topic).unwrap();
@@ -162,7 +151,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Listen on all interfaces and whatever port the OS assigns
-    Swarm::listen_on(&mut swarm, "/ip4/0.0.0.0/tcp/0".parse()?)?;
+    Swarm::listen_on(&mut swarm, "/ip4/0.0.0.0/tcp/0".parse()?).unwrap();
+    for addr in Swarm::listeners(&swarm) {
+        dbg!(addr);
+    }
     tokio::spawn(run(swarm, gossipsub_topic));
     tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     Ok(())
@@ -171,9 +163,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn run(mut swarm: Swarm<MyBehaviour>, gossipsub_topic: IdentTopic) {
     // Read full lines from stdin
     let mut stdin = io::BufReader::new(io::stdin()).lines();
+    //let peerid: PeerId = "12D3KooWK379MZgvrnYLYj2zFDuVWRLZbF7JBsrNqrJYJqXvgfzv".parse().unwrap();
+    //swarm.gossipsub.add_explicit_peer(&peerid);
     // Kick it off
     let mut listening = false;
     loop {
+        if !listening {
+            println!("hi");
+            for addr in Swarm::listeners(&swarm) {
+                println!("Listening on {:?}", addr);
+                listening = true;
+            }
+        }
         let to_publish = {
             tokio::select! {
                 line = stdin.next_line() => {
@@ -181,28 +182,8 @@ async fn run(mut swarm: Swarm<MyBehaviour>, gossipsub_topic: IdentTopic) {
                     Some((gossipsub_topic.clone(), line))
                 }
                 event = swarm.next() => {
+                    println!("hi");
                     match event {
-                        OutEvent::MdnsEvent(mdnsevent) => {
-                            match mdnsevent {
-                                MdnsEvent::Discovered(list) => {
-                                    for (peer, _) in list {
-                                        println!("adding peer: {:?}", peer);
-                                        swarm.gossipsub.add_explicit_peer(&peer);
-                                    }
-                                    None
-                                }
-                                MdnsEvent::Expired(list) => {
-                                    for (peer, _) in list {
-                                        if !swarm.mdns.has_node(&peer) {
-                                            println!("removing peer: {:?}", peer);
-                                            swarm.gossipsub.remove_explicit_peer(&peer);
-                                        }
-                                    }
-                                    None
-                                }
-                            }
-
-                        },
                         OutEvent::GossipsubEvent(gossipsubevent) => {
                             if let GossipsubEvent::Message { message, message_id, propagation_source } = gossipsubevent {
                                 println!("Received: '{:?}' from {:?}", String::from_utf8_lossy(&message.data), message.source);
@@ -216,12 +197,6 @@ async fn run(mut swarm: Swarm<MyBehaviour>, gossipsub_topic: IdentTopic) {
         };
         if let Some((topic, line)) = to_publish {
             swarm.gossipsub.publish(topic, line.as_bytes()).unwrap();
-        }
-        if !listening {
-            for addr in Swarm::listeners(&swarm) {
-                println!("Listening on {:?}", addr);
-                listening = true;
-            }
         }
     }
 }
