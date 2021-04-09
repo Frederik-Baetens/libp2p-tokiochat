@@ -46,7 +46,7 @@ use libp2p::{
     mdns::{Mdns, MdnsEvent},
     mplex,
     noise,
-    swarm::SwarmBuilder,
+    swarm::{NetworkBehaviourEventProcess, SwarmBuilder},
     // `TokioTcpConfig` is available through the `tcp-tokio` feature.
     tcp::TokioTcpConfig,
     Multiaddr,
@@ -60,35 +60,6 @@ use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use tokio::io::{self, AsyncBufReadExt};
-
-#[derive(Debug)]
-pub enum OutEvent {
-    GossipsubEvent(GossipsubEvent),
-    MdnsEvent(MdnsEvent),
-}
-
-impl From<GossipsubEvent> for OutEvent {
-    fn from(gossipsubevent: GossipsubEvent) -> Self {
-        OutEvent::GossipsubEvent(gossipsubevent)
-    }
-}
-
-impl From<MdnsEvent> for OutEvent {
-    fn from(mdnsevent: MdnsEvent) -> Self {
-        OutEvent::MdnsEvent(mdnsevent)
-    }
-}
-
-// We create a custom network behaviour that combines floodsub and mDNS.
-// The derive generates a delegating `NetworkBehaviour` impl which in turn
-// requires the implementations of `NetworkBehaviourEventProcess` for
-// the events of each behaviour.
-#[behaviour(out_event = "OutEvent", event_process = false)]
-#[derive(NetworkBehaviour)]
-struct MyBehaviour {
-    gossipsub: Gossipsub,
-    mdns: Mdns,
-}
 
 /// The `tokio::main` attribute sets up a tokio runtime.
 #[tokio::main]
@@ -114,19 +85,75 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .multiplex(mplex::MplexConfig::new())
         .boxed();
 
-    // Create a Gossipsub topic
-    let gossipsub_topic = IdentTopic::new("chat");
+    // Create a Floodsub topic
+    let floodsub_topic = gossipsub::IdentTopic::new("chat");
+
+    // We create a custom network behaviour that combines floodsub and mDNS.
+    // The derive generates a delegating `NetworkBehaviour` impl which in turn
+    // requires the implementations of `NetworkBehaviourEventProcess` for
+    // the events of each behaviour.
+    #[derive(NetworkBehaviour)]
+    struct MyBehaviour {
+        gossipsub: Gossipsub,
+        mdns: Mdns,
+    }
+
+    impl NetworkBehaviourEventProcess<GossipsubEvent> for MyBehaviour {
+        // Called when `floodsub` produces an event.
+        fn inject_event(&mut self, gossipsubevent: GossipsubEvent) {
+            if let GossipsubEvent::Message {
+                message,
+                message_id,
+                propagation_source,
+            } = gossipsubevent
+            {
+                println!(
+                    "Received: '{:?}' from {:?}",
+                    String::from_utf8_lossy(&message.data),
+                    message.source
+                );
+                println!(
+                    "message id was {:?} and propagation_source was {:?}",
+                    message_id, propagation_source
+                );
+            }
+        }
+    }
+
+    impl NetworkBehaviourEventProcess<MdnsEvent> for MyBehaviour {
+        // Called when `mdns` produces an event.
+        fn inject_event(&mut self, event: MdnsEvent) {
+            match event {
+                MdnsEvent::Discovered(list) => {
+                    for (peer, _) in list {
+                        println!("adding peer: {:?}", peer);
+                        self.gossipsub.add_explicit_peer(&peer);
+                    }
+                }
+                MdnsEvent::Expired(list) => {
+                    for (peer, _) in list {
+                        if !self.mdns.has_node(&peer) {
+                            println!("removing peer: {:?}", peer);
+                            self.gossipsub.remove_explicit_peer(&peer);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Create a Swarm to manage peers and events.
-    let mut swarm: Swarm<MyBehaviour> = {
-        let mdns = Mdns::new(Default::default()).await?;
-
+    let mut swarm = {
         // To content-address message, we can take the hash of message and use it as an ID.
         let message_id_fn = |message: &GossipsubMessage| {
             let mut s = DefaultHasher::new();
             message.data.hash(&mut s);
             MessageId::from(s.finish().to_string())
         };
+
+    // Create a Gossipsub topic
+    let gossipsub_topic = IdentTopic::new("chat");
+
 
         // Set a custom gossipsub
         let gossipsub_config = gossipsub::GossipsubConfigBuilder::default()
@@ -137,13 +164,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .build()
             .expect("Valid config");
 
+        let mdns = Mdns::new(Default::default()).await?;
         let mut behaviour = MyBehaviour {
             gossipsub: Gossipsub::new(MessageAuthenticity::Signed(id_keys), gossipsub_config)
                 .unwrap(),
             mdns,
         };
 
-        behaviour.gossipsub.subscribe(&gossipsub_topic).unwrap();
+
+        behaviour.gossipsub.subscribe(&gossipsub_topic.clone()).unwrap();
 
         SwarmBuilder::new(transport, behaviour, peer_id)
             // We want the connection background tasks to be spawned
@@ -161,61 +190,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("Dialed {:?}", to_dial)
     }
 
-    // Listen on all interfaces and whatever port the OS assigns
-    Swarm::listen_on(&mut swarm, "/ip4/0.0.0.0/tcp/0".parse()?)?;
-    tokio::spawn(run(swarm, gossipsub_topic));
-    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-    Ok(())
-}
-
-async fn run(mut swarm: Swarm<MyBehaviour>, gossipsub_topic: IdentTopic) {
     // Read full lines from stdin
     let mut stdin = io::BufReader::new(io::stdin()).lines();
+
+    // Listen on all interfaces and whatever port the OS assigns
+    Swarm::listen_on(&mut swarm, "/ip4/0.0.0.0/tcp/0".parse()?)?;
+
     // Kick it off
     let mut listening = false;
     loop {
         let to_publish = {
             tokio::select! {
                 line = stdin.next_line() => {
-                    let line = line.unwrap().expect("stdin closed");
-                    Some((gossipsub_topic.clone(), line))
+                    let line = line?.expect("stdin closed");
+                    Some((floodsub_topic.clone(), line))
                 }
                 event = swarm.next() => {
-                    match event {
-                        OutEvent::MdnsEvent(mdnsevent) => {
-                            match mdnsevent {
-                                MdnsEvent::Discovered(list) => {
-                                    for (peer, _) in list {
-                                        println!("adding peer: {:?}", peer);
-                                        swarm.gossipsub.add_explicit_peer(&peer);
-                                    }
-                                    None
-                                }
-                                MdnsEvent::Expired(list) => {
-                                    for (peer, _) in list {
-                                        if !swarm.mdns.has_node(&peer) {
-                                            println!("removing peer: {:?}", peer);
-                                            swarm.gossipsub.remove_explicit_peer(&peer);
-                                        }
-                                    }
-                                    None
-                                }
-                            }
-
-                        },
-                        OutEvent::GossipsubEvent(gossipsubevent) => {
-                            if let GossipsubEvent::Message { message, message_id, propagation_source } = gossipsubevent {
-                                println!("Received: '{:?}' from {:?}", String::from_utf8_lossy(&message.data), message.source);
-                                println!("message id was {:?} and propagation_source was {:?}", message_id, propagation_source);
-                            }
-                            None
-                        }
-                    }
+                    // All events are handled by the `NetworkBehaviourEventProcess`es.
+                    // I.e. the `swarm.next()` future drives the `Swarm` without ever
+                    // terminating.
+                    panic!("Unexpected event: {:?}", event);
                 }
             }
         };
         if let Some((topic, line)) = to_publish {
-            swarm.gossipsub.publish(topic, line.as_bytes()).unwrap();
+            swarm
+                .gossipsub
+                .publish(topic, line.as_bytes()).unwrap();
         }
         if !listening {
             for addr in Swarm::listeners(&swarm) {
