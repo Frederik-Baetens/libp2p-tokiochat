@@ -149,6 +149,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Swarm::dial_addr(&mut swarm, addr)?;
         println!("Dialed {:?}", to_dial)
     }
+    swarm.gossipsub.add_explicit_peer(&peer_id);
 
     // Listen on all interfaces and whatever port the OS assigns
     Swarm::listen_on(&mut swarm, "/ip4/0.0.0.0/tcp/0".parse()?).unwrap();
