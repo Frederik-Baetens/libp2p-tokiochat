@@ -10,4 +10,4 @@ edition = "2018"
 tokio = { version="1", features = ["full"] }
 env_logger = "0.8"
 futures = "0.3"
-libp2p = { version = "0.36", features = ["tcp-tokio", "libp2p-mdns"] }
+libp2p = { git= "https://github.com/sigp/rust-libp2p/", branch = "gossip-keep-alive", features = ["tcp-tokio", "libp2p-mdns"] }

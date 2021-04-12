@@ -133,25 +133,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Some(to_dial) = std::env::args().nth(1) {
         println!("{}", to_dial);
         let addr: Multiaddr = to_dial.parse()?;
-        Swarm::dial_addr(&mut swarm, addr)?;
+        swarm.dial_addr(addr)?;
         println!("Dialed {:?}", to_dial)
     }
 
     // Listen on all interfaces and whatever port the OS assigns
-    Swarm::listen_on(&mut swarm, "/ip4/0.0.0.0/tcp/0".parse()?).unwrap();
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?).unwrap();
 
     use futures::future;
     use futures::Stream;
     use std::task::Poll;
     use std::pin::Pin;
     future::poll_fn(|cx| {
-        if Swarm::listeners(&swarm).peekable().peek().is_some() {
+        if swarm.listeners().peekable().peek().is_some() {
             Poll::Ready(None)
         } else {
             Pin::new(&mut swarm).poll_next(cx)
         }
     }).await;
-    for addr in Swarm::listeners(&swarm) {
+    for addr in swarm.listeners() {
         dbg!(addr);
     }
     tokio::spawn(run(swarm, gossipsub_topic)).await.unwrap();
@@ -167,7 +167,7 @@ async fn run(mut swarm: Swarm<Gossipsub>, gossipsub_topic: IdentTopic) {
     let mut listening = false;
     loop {
         if !listening {
-            for addr in Swarm::listeners(&swarm) {
+            for addr in swarm.listeners() {
                 println!("Listening on {:?}", addr);
                 listening = true;
             }
@@ -206,7 +206,7 @@ async fn run(mut swarm: Swarm<Gossipsub>, gossipsub_topic: IdentTopic) {
             }
         };
         if let Some((topic, line)) = to_publish {
-            swarm.publish(topic.clone(), line.as_bytes()).unwrap();
+            swarm.behaviour_mut().publish(topic.clone(), line.as_bytes()).unwrap();
         }
         println!("heyahee");
     }
