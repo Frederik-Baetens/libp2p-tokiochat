@@ -37,29 +37,26 @@
 //! ```
 
 use libp2p::{
-    core::upgrade,
     gossipsub::{
         self, Gossipsub, GossipsubEvent, GossipsubMessage, IdentTopic, MessageAuthenticity,
         MessageId, ValidationMode,
     },
+    Transport,
+    core::upgrade,
     identity,
-    mdns::{Mdns, MdnsEvent},
-    mplex,
     noise,
-    swarm::SwarmBuilder,
-    // `TokioTcpConfig` is available through the `tcp-tokio` feature.
+    mplex,
     tcp::TokioTcpConfig,
     Multiaddr,
-    NetworkBehaviour,
     PeerId,
     Swarm,
-    Transport,
+    swarm::SwarmEvent,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
-use std::future::Future;
+use futures::StreamExt;
 use tokio::io::{self, AsyncBufReadExt};
 
 
@@ -80,13 +77,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Create a tokio-based TCP transport use noise for authenticated
     // encryption and Mplex for multiplexing of substreams on a TCP stream.
-   //let transport = TokioTcpConfig::new()
-   //    .nodelay(true)
-   //    .upgrade(upgrade::Version::V1)
-   //    .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
-   //    .multiplex(mplex::MplexConfig::new())
-   //    .boxed();
-    let transport = libp2p::development_transport(id_keys.clone()).await?;
+    let transport = TokioTcpConfig::new()
+        .nodelay(true)
+        .upgrade(upgrade::Version::V1)
+        .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
+        .multiplex(mplex::MplexConfig::new())
+        .boxed();
 
     // Create a Gossipsub topic
     let gossipsub_topic = IdentTopic::new("chat");
@@ -118,22 +114,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // subscribes to our topic
         gossipsub2.subscribe(&gossipsub_topic).unwrap();
 
-        libp2p::Swarm::new(transport, gossipsub2, peer_id)
+        //libp2p::Swarm::new(transport, gossipsub2, peer_id)
 
-        //SwarmBuilder::new(transport, gossipsub2, peer_id)
-        //    // We want the connection background tasks to be spawned
-        //    // onto the tokio runtime.
-        //    .executor(Box::new(|fut| {
-        //        tokio::spawn(fut);
-        //    }))
-        //    .build()
+        libp2p::swarm::SwarmBuilder::new(transport, gossipsub2, peer_id)
+            // We want the connection background tasks to be spawned
+            // onto the tokio runtime.
+            .executor(Box::new(|fut| {
+                tokio::spawn(fut);
+            }))
+            .build()
     };
 
     // Reach out to another node if specified
     if let Some(to_dial) = std::env::args().nth(1) {
-        println!("{}", to_dial);
+        println!("dialing {}", to_dial);
         let addr: Multiaddr = to_dial.parse()?;
-        swarm.dial_addr(addr)?;
+        swarm.dial(addr)?;
         println!("Dialed {:?}", to_dial)
     }
 
@@ -184,16 +180,16 @@ async fn run(mut swarm: Swarm<Gossipsub>, gossipsub_topic: IdentTopic) {
                         None
                     }
                 }
-                event = swarm.next() => {
+                event = swarm.select_next_some() => {
                     // All events are handled by the `NetworkBehaviourEventProcess`es.
                     // I.e. the `swarm.next()` future drives the `Swarm` without ever
                     // terminating.
                     match event {
-                        GossipsubEvent::Message {
+                        SwarmEvent::Behaviour(GossipsubEvent::Message {
                             propagation_source: peer_id,
                             message_id: id,
                             message,
-                        } => {println!(
+                        }) => {println!(
                             "Got message: {} with id: {} from peer: {:?}",
                             String::from_utf8_lossy(&message.data),
                             id,
