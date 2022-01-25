@@ -50,7 +50,8 @@ use libp2p::{
     Multiaddr,
     PeerId,
     Swarm,
-    swarm::SwarmEvent,
+    NetworkBehaviour,
+    swarm::{SwarmEvent, NetworkBehaviourEventProcess},
 };
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
@@ -58,6 +59,29 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use futures::StreamExt;
 use tokio::io::{self, AsyncBufReadExt};
+
+#[derive(NetworkBehaviour)]
+#[behaviour(event_process = true)]
+struct ChatBehaviour {
+    gossipsub: Gossipsub,
+}
+
+impl NetworkBehaviourEventProcess<GossipsubEvent> for ChatBehaviour {
+    fn inject_event(&mut self, event: GossipsubEvent) {
+        if let GossipsubEvent::Message {
+                propagation_source: peer_id,
+                message_id: id,
+                message,
+            } = event {
+                println!(
+                    "Got message: {} with id: {} from peer: {:?}",
+                    String::from_utf8_lossy(&message.data),
+                    id,
+                    peer_id
+                    );
+            }
+    }
+}
 
 
 /// The `tokio::main` attribute sets up a tokio runtime.
@@ -88,7 +112,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let gossipsub_topic = IdentTopic::new("chat");
 
     // Create a Swarm to manage peers and events.
-    let mut swarm: Swarm<Gossipsub> = {
+    let mut swarm: Swarm<ChatBehaviour> = {
         // To content-address message, we can take the hash of message and use it as an ID.
         let message_id_fn = |message: &GossipsubMessage| {
             let mut s = DefaultHasher::new();
@@ -106,18 +130,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .build()
             .expect("Valid config");
 
-
-        // build a gossipsub network behaviour
-        let mut gossipsub2: gossipsub::Gossipsub =
-            gossipsub::Gossipsub::new(MessageAuthenticity::Signed(id_keys), gossipsub_config)
-                .expect("Correct configuration");
+        let mut chatbehaviour = ChatBehaviour {
+            gossipsub: gossipsub::Gossipsub::new(MessageAuthenticity::Signed(id_keys), gossipsub_config)
+                .expect("Correct configuration"),
+        };
 
         // subscribes to our topic
-        gossipsub2.subscribe(&gossipsub_topic).unwrap();
+        chatbehaviour.gossipsub.subscribe(&gossipsub_topic).unwrap();
 
-        //libp2p::Swarm::new(transport, gossipsub2, peer_id)
-
-        libp2p::swarm::SwarmBuilder::new(transport, gossipsub2, peer_id)
+        libp2p::swarm::SwarmBuilder::new(transport, chatbehaviour, peer_id)
             // We want the connection background tasks to be spawned
             // onto the tokio runtime.
             .executor(Box::new(|fut| {
@@ -155,7 +176,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn run(mut swarm: Swarm<Gossipsub>, gossipsub_topic: IdentTopic) {
+async fn run(mut swarm: Swarm<ChatBehaviour>, gossipsub_topic: IdentTopic) {
     // Read full lines from stdin
     let mut stdin = io::BufReader::new(io::stdin()).lines();
     //let peerid: PeerId = "12D3KooWK379MZgvrnYLYj2zFDuVWRLZbF7JBsrNqrJYJqXvgfzv".parse().unwrap();
@@ -173,7 +194,7 @@ async fn run(mut swarm: Swarm<Gossipsub>, gossipsub_topic: IdentTopic) {
             tokio::select! {
                 line = stdin.next_line() => {
                     let line = line.unwrap().expect("stdin closed");
-                    if line != "" {
+                    if !line.is_empty()  {
                         dbg!(&line);
                         Some((gossipsub_topic.clone(), line))
                     } else {
@@ -186,24 +207,13 @@ async fn run(mut swarm: Swarm<Gossipsub>, gossipsub_topic: IdentTopic) {
                     // I.e. the `swarm.next()` future drives the `Swarm` without ever
                     // terminating.
                     match event {
-                        SwarmEvent::Behaviour(GossipsubEvent::Message {
-                            propagation_source: peer_id,
-                            message_id: id,
-                            message,
-                        }) => {println!(
-                            "Got message: {} with id: {} from peer: {:?}",
-                            String::from_utf8_lossy(&message.data),
-                            id,
-                            peer_id
-                        );
-                        None},
                         _ => {None}
                     }
                 }
             }
         };
         if let Some((topic, line)) = to_publish {
-            swarm.behaviour_mut().publish(topic.clone(), line.as_bytes()).unwrap();
+            swarm.behaviour_mut().gossipsub.publish(topic.clone(), line.as_bytes()).unwrap();
         }
         println!("heyahee");
     }
