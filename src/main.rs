@@ -38,10 +38,7 @@ use libp2p::{
     },
     identify::{Identify, IdentifyConfig, IdentifyEvent, IdentifyInfo},
     identity::{self, Keypair},
-    kad::{
-        self, record::store::MemoryStore, GetClosestPeersError, GetClosestPeersOk, Kademlia,
-        KademliaConfig, KademliaEvent, QueryResult,
-    },
+    kad::{self, record::store::MemoryStore, Kademlia, KademliaConfig, KademliaEvent},
     mplex, noise,
     swarm::NetworkBehaviourEventProcess,
     tcp::TokioTcpConfig,
@@ -111,46 +108,7 @@ impl NetworkBehaviourEventProcess<IdentifyEvent> for ChatBehaviour {
 }
 
 impl NetworkBehaviourEventProcess<KademliaEvent> for ChatBehaviour {
-    fn inject_event(&mut self, event: KademliaEvent) {
-        match event {
-            KademliaEvent::OutboundQueryCompleted {
-                result: QueryResult::GetClosestPeers(result),
-                ..
-            } => {
-                match result {
-                    Ok(GetClosestPeersOk { key: _, peers }) => {
-                        if !peers.is_empty() {
-                            println!("Query finished with closest peers: {:#?}", peers);
-                            for peer in peers {
-                                println!("gossipsub adding peer {peer}");
-                                self.gossipsub.add_explicit_peer(&peer);
-                            }
-                        } else {
-                            // The example is considered failed as there
-                            // should always be at least 1 reachable peer.
-                            println!("Query finished with no closest peers.")
-                        }
-                    }
-                    Err(GetClosestPeersError::Timeout { peers, .. }) => {
-                        if !peers.is_empty() {
-                            println!("Query timed out with closest peers: {:#?}", peers);
-                            for peer in peers {
-                                println!("gossipsub adding peer {peer}");
-                                self.gossipsub.add_explicit_peer(&peer);
-                            }
-                        } else {
-                            // The example is considered failed as there
-                            // should always be at least 1 reachable peer.
-                            println!("Query timed out with no closest peers.");
-                        }
-                    }
-                };
-            }
-            evnt => {
-                dbg!(evnt);
-            }
-        }
-    }
+    fn inject_event(&mut self, _: KademliaEvent) {}
 }
 
 /// The `tokio::main` attribute sets up a tokio runtime.
@@ -300,9 +258,7 @@ fn create_gossipsub_behavior(id_keys: Keypair) -> Gossipsub {
         .expect("Correct configuration")
 }
 
-fn create_kademlia_behavior(
-    local_peer_id: PeerId,
-) -> Kademlia<MemoryStore> {
+fn create_kademlia_behavior(local_peer_id: PeerId) -> Kademlia<MemoryStore> {
     // Create a Kademlia behaviour.
     let mut cfg = KademliaConfig::default();
     cfg.set_query_timeout(Duration::from_secs(5 * 60));
