@@ -168,14 +168,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Reach out to another node if specified
     if let Some(boot_addr) = boot_addr {
         println!("dialing {}", &boot_addr);
-        swarm.dial(boot_addr.clone())?;
+        //swarm.dial(boot_addr.clone())?;
         println!("Dialed {:?}", &boot_addr);
 
         println!("pushing identity to boot node");
-        swarm
-            .behaviour_mut()
-            .identify
-            .push(std::iter::once(boot_peerid.unwrap()));
 
         println!("pushing adding boot node to kademlia routing table");
         swarm
