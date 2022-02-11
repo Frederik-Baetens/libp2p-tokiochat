@@ -185,7 +185,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Searching for the closest peers to {:?}", to_search);
     swarm.behaviour_mut().kademlia.get_closest_peers(to_search);
 
-    tokio::spawn(run(swarm, gossipsub_topic)).await.unwrap();
+    let swarm_handle = tokio::spawn(run(swarm, gossipsub_topic));
+
+    swarm_handle.await.unwrap();
+
     Ok(())
 }
 
