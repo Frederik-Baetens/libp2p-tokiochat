@@ -1,3 +1,7 @@
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![warn(clippy::nursery)]
+
 // Copyright 2016 Parity Technologies (UK) Ltd.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -29,7 +33,7 @@
 //! cargo run --example peer-discovery --features="tcp-tokio mdns-tokio"
 //! ```
 
-use futures::StreamExt;
+use futures::stream::{self, StreamExt};
 use libp2p::{
     core::{upgrade, PublicKey},
     gossipsub::{
@@ -48,6 +52,10 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::{env::args, error::Error, time::Duration};
 use tokio::io::{self, AsyncBufReadExt};
+use tokio::sync::mpsc::{self, Receiver};
+use rand::{distributions::Alphanumeric, Rng, thread_rng};
+use itertools::Itertools;
+use tokio::time::sleep;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(event_process = true)]
@@ -55,6 +63,9 @@ struct ChatBehaviour {
     gossipsub: Gossipsub,
     kademlia: Kademlia<MemoryStore>,
     identify: Identify,
+
+    #[behaviour(ignore)]
+    msgcounter: u64,
 }
 
 impl NetworkBehaviourEventProcess<GossipsubEvent> for ChatBehaviour {
@@ -65,12 +76,17 @@ impl NetworkBehaviourEventProcess<GossipsubEvent> for ChatBehaviour {
             message,
         } = event
         {
-            println!(
-                "Got message: {} with id: {} from peer: {:?}",
-                String::from_utf8_lossy(&message.data),
-                id,
-                peer_id
-            );
+            self.msgcounter +=1;
+            println!("{}", self.msgcounter);
+            if message.data == b"end_stream" {
+                println!(
+                    "Got message: {} with id: {} from peer: {:?} at time: {:?}",
+                    String::from_utf8_lossy(&message.data),
+                    id,
+                    peer_id,
+                    std::time::SystemTime::now(),
+                );
+            }
         }
     }
 }
@@ -148,6 +164,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             gossipsub: create_gossipsub_behavior(id_keys.clone()),
             kademlia: create_kademlia_behavior(peer_id),
             identify: create_identify_behavior(id_keys.public()),
+            msgcounter: 0,
         };
 
         // subscribes to our topic
@@ -185,14 +202,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Searching for the closest peers to {:?}", to_search);
     swarm.behaviour_mut().kademlia.get_closest_peers(to_search);
 
-    let swarm_handle = tokio::spawn(run(swarm, gossipsub_topic));
+    let (sender, receiver) = mpsc::channel(100);
+   
+    let swarm_handle = tokio::spawn(run(swarm, gossipsub_topic, receiver));
 
+    sleep(Duration::from_secs(2)).await;
+
+    let start_time = std::time::SystemTime::now();
+
+    if Some(String::from("bench")) == args().nth(3) {
+        println!("benching");
+        stream::iter(thread_rng().sample_iter(Alphanumeric).take(900_000).chunks(9).into_iter())
+            .for_each_concurrent(30, |chunk| async {
+                let message: String = chunk.collect();
+                sender.send(message).await.unwrap();
+            })
+            .await;
+            sender.send("end_stream".to_string()).await.unwrap();
+    }
+    
+    let sys_time = std::time::SystemTime::now();
+    println!("{start_time:?}");
+    println!("{sys_time:?}");
+    
     swarm_handle.await.unwrap();
 
     Ok(())
 }
 
-async fn run(mut swarm: Swarm<ChatBehaviour>, gossipsub_topic: IdentTopic) {
+async fn run(mut swarm: Swarm<ChatBehaviour>, gossipsub_topic: IdentTopic, mut receiver: Receiver<String>) {
     // Read full lines from stdin
     let mut stdin = io::BufReader::new(io::stdin()).lines();
     // Kick it off
@@ -206,32 +244,24 @@ async fn run(mut swarm: Swarm<ChatBehaviour>, gossipsub_topic: IdentTopic) {
                 listening = true;
             }
         }
-        let to_publish = {
-            tokio::select! {
-                line = stdin.next_line() => {
-                    let line = line.unwrap().expect("stdin closed");
-                    if !line.is_empty()  {
-                        dbg!(&line);
-                        Some((gossipsub_topic.clone(), line))
-                    } else {
-                        println!("{}", line);
-                        None
-                    }
-                }
-                _ = swarm.select_next_some() => {
-                    // All events are handled by the `NetworkBehaviourEventProcess`es.
-                    // I.e. the `swarm.select_next_some()` future drives the `Swarm` without ever
-                    // terminating.
-                    None
+        tokio::select! {
+            line = stdin.next_line() => {
+                let line = line.unwrap().expect("stdin closed");
+                if line.is_empty()  {
+                    println!("{}", line);
+                } else {
+                    dbg!(&line);
+                    swarm.behaviour_mut().gossipsub.publish(gossipsub_topic.clone(), line.as_bytes()).unwrap();
                 }
             }
-        };
-        if let Some((topic, line)) = to_publish {
-            swarm
-                .behaviour_mut()
-                .gossipsub
-                .publish(topic.clone(), line.as_bytes())
-                .unwrap();
+            Some(benchmessage) = receiver.recv() => {
+                println!("benching {benchmessage}");
+                swarm.behaviour_mut().gossipsub.publish(gossipsub_topic.clone(), benchmessage.as_bytes()).unwrap();
+            }
+            // All events are handled by the `NetworkBehaviourEventProcess`es.
+            // I.e. the `swarm.select_next_some()` future drives the `Swarm` without ever
+            // terminating.
+            _ = swarm.select_next_some() => {}
         }
     }
 }

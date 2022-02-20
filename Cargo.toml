@@ -3,6 +3,8 @@ name = "tokiochat"
 version = "0.1.0"
 authors = ["Frederik Baetens <baetens.fr@gmail.com>"]
 edition = "2018"
+description = "small chat application to test libp2p gossipsub"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -11,3 +13,5 @@ tokio = { version="1", features = ["full"] }
 env_logger = "0.8"
 futures = "0.3"
 libp2p = { version="~0.41", features = ["tcp-tokio"] }
+rand = "~0"
+itertools = "*"

@@ -2588,7 +2588,9 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "futures",
+ "itertools",
  "libp2p",
+ "rand 0.7.3",
  "tokio",
 ]
 
